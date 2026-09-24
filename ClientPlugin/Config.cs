@@ -51,14 +51,6 @@ public class Config : INotifyPropertyChanged
         set => SetField(ref field, value);
     } = false;
 
-    [Slider(80f, 400f, 10f, description: "SDR paper-white / UI brightness in nits")]
-    public float PaperWhite
-    {
-        get;
-        [UsedImplicitly]
-        set => SetField(ref field, value);
-    } = 200f;
-
     [Slider(400f, 4000f, 100f, description: "Display peak brightness in nits")]
     public float PeakBrightness
     {
@@ -67,13 +59,32 @@ public class Config : INotifyPropertyChanged
         set => SetField(ref field, value);
     } = 1000f;
 
-    [Slider(200f, 4000f, 100f, description: "Expected scene peak in nits (EETF source ceiling)")]
-    public float SourcePeak
+    [Slider(80f, 500f, 10f, description: "Game world brightness in nits: where SDR white lands. Highlights go above it up to peak. BT.2408: 203.")]
+    public float ScenePaperWhite
     {
         get;
         [UsedImplicitly]
         set => SetField(ref field, value);
-    } = 1000f;
+    } = 200f;
+
+    // Serialized as <PaperWhite>: that setting only ever drove the UI composite, so
+    // existing configs already hold the UI brightness there.
+    [XmlElement("PaperWhite")]
+    [Slider(40f, 500f, 10f, label: "UI brightness", description: "Menus and HUD in nits. Independent of paper white.")]
+    public float UiBrightness
+    {
+        get;
+        [UsedImplicitly]
+        set => SetField(ref field, value);
+    } = 200f;
+
+    [Slider(4f, 8f, 0.5f, description: "Stops above average scene brightness that keep highlight detail; brighter content sits at peak. Lower it on dim displays: 4 for 400 nits.")]
+    public float HighlightRange
+    {
+        get;
+        [UsedImplicitly]
+        set => SetField(ref field, value);
+    } = 6f;
 
     [Slider(0f, 0.1f, 0.005f, description: "Shadow lift (raise dark detail)")]
     public float BlackLift

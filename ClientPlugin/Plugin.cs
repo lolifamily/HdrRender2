@@ -8,6 +8,12 @@ using Keen.VRage.Core.Plugins;
 using Keen.VRage.Library.Diagnostics;
 using Vortice.DXGI;
 
+// Define assembly version when compiled by Pulsar
+#if !DEV_BUILD
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]
+#endif
+
 namespace ClientPlugin;
 
 public class Plugin : IPlugin
@@ -155,7 +161,7 @@ public class Plugin : IPlugin
         sharedUi.CreateScreen<SettingsScreen>(viewModel, showCursor: true);
     }
 
-    // Invoked by Pulsar via reflection with the plugin's asset folder (AssetFolder from the XML).
+    // Invoked by Pulsar via reflection with the local path of the asset named AssetFolder in the XML.
     [UsedImplicitly]
     private void LoadAssets(string assetFolder)
     {

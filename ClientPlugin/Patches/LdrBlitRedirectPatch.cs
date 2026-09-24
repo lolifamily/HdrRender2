@@ -6,34 +6,26 @@ using Keen.VRage.Render12.Resources.Views;
 
 namespace ClientPlugin.Patches;
 
-// Catch SDR content that gets blitted straight into ScreenBuffers.FinalLDRTexture, bypassing our HDR
-// composite, and route it into the UI layer so it flows through the composite like everything else.
+// The video player bypasses the UI's render target: VideoBatch.Draw blits each decoded frame with CopyLDRJob
+// straight into ScreenBuffers.FinalLDRTexture instead of the target the UI hands it. Our present copies Composite,
+// not FinalLDR, so the frame would be dropped -> black video. Route it into the UI layer so it is composited with
+// the rest of the UI. UiLayer matches FinalLDR's format (R8G8B8A8_UNorm_SRgb), which is also CopyLDRJob's fixed
+// RTV format, so the redirected RTV binds cleanly.
 //
-// The plugin's job is to bring *every* final SDR write into the HDR composite: the scene (TonemapPatch),
-// the UI (UiLayerPatch), and anything else that lands in FinalLDR. A CopyJob.DoWork with destination ==
-// FinalLDRTexture is exactly such a stray write -- it never reached HdrScene or UiLayer, so our present
-// (which copies Composite, not FinalLDR) would drop it -> black screen. Today the only such write is the
-// video player (VideoBatch blits the decoded frame via CopyLDRJob), which is what surfaced this; but we
-// deliberately key on the *destination*, not on "is this video", because the fix is the same for any SDR
-// source that bypasses us, and that matches what the plugin is fundamentally for.
-//
-// This keys on stable public infrastructure -- the CopyJob.DoWork signature and the FinalLDRTexture
-// resource -- not on any method's internal IL, so an engine rework of the video path can't silently
-// black-screen us. Scope is tight: every other engine CopyJob targets its own intermediate buffer (scene,
-// GI, water, depth, screenshot downsample -- all different formats), never FinalLDR, so nothing else is
-// touched; and the engine's own FinalLDR fills (tonemap / composite) go through compute dispatch, not
-// CopyJob, so they're unaffected too. UiLayer matches FinalLDR's type and format (R8G8B8A8_UNorm_SRgb),
-// which is also CopyLDRJob's fixed RTV format, so the redirected RTV binds cleanly.
+// Keyed on the writer, not just the destination: VideoBatch is CopyLDRJob's only caller. The engine's own copies
+// into FinalLDR -- the FXAA result and the plain copy used when post-processing is off -- go through
+// SceneDrawSystem's own CopyJob and must land in FinalLDR untouched; redirected, they would be cleared before the
+// UI draws. On hold frames the video frame lands in a layer that isn't composited, like the rest of that frame.
 [HarmonyPatch(typeof(CopyJob), nameof(CopyJob.DoWork))]
 internal static class LdrBlitRedirectPatch
 {
-    private static void Prefix(ref IRenderTargetView destination)
+    private static void Prefix(CopyJob __instance, ref IRenderTargetView destination)
     {
-        if (!HdrPipeline.Ready || HdrPipeline.UiLayer == null)
-            return; // HDR not live: leave the engine's SDR path untouched
+        if (!ReferenceEquals(__instance, CoreSystems.CopyLDRJob) || HdrPipeline.UiLayer == null)
+            return; // not the video blit, or HDR not live
         if (!ReferenceEquals(destination, CoreSystems.ScreenBuffers.FinalLDRTexture))
             return; // only take over writes into the final SDR buffer
 
-        destination = HdrPipeline.UiLayer; // fold this SDR blit into the composited UI layer
+        destination = HdrPipeline.UiLayer; // fold the video frame into the composited UI layer
     }
 }

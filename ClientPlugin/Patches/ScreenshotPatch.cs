@@ -11,7 +11,7 @@ namespace ClientPlugin.Patches;
 // HDR EXR export -- additive, not a takeover.
 //
 // The tonemap (TonemapPatch) and UI composite (UiLayerPatch) already refilled the correct SDR into the engine's
-// FinalLDRTexture, so the engine's native SaveScreenshotAsync can read back SDR from FinalLDR on its own: the
+// FinalLDRTexture, so the engine's native screenshot save can read back SDR from FinalLDR on its own: the
 // downsampled thumbnail/icon is scaled by the engine's CopyJob and jpg/bmp is encoded by the engine, all for free,
 // so I let them all through with return true.
 //
@@ -21,10 +21,11 @@ namespace ClientPlugin.Patches;
 // TaskCompletionSource (the engine reads back and SetResults on its own), so an external screenshot awaiter still waits on the engine's SDR, unaffected.
 //
 // publicizer has opened up VRage.Render12, so the private nested Screenshot is directly accessible, no reflection needed.
-[HarmonyPatch(typeof(ScreenshotsManager), "SaveScreenshotAsync")]
+[HarmonyPatch(typeof(ScreenshotsManager), nameof(ScreenshotsManager.WaitTillReadyAndSaveScreenshotAsync))]
 internal static class ScreenshotPatch
 {
-    private static void Prefix(ScreenshotsManager.Screenshot screenshot)
+    // readyFrame: the frame at which the engine's copy (recorded just before this call) has left the GPU.
+    private static void Prefix(ScreenshotsManager.Screenshot screenshot, int readyFrame)
     {
         if (screenshot.DownsampleResolution != null)
             return; // thumbnail/icon: the engine's CopyJob scales from FinalLDR and saves SDR, for free
@@ -33,7 +34,7 @@ internal static class ScreenshotPatch
         if (!HdrPipeline.Ready)
             return;
 
-        // EXR source: Composite for with-UI, HdrScene for without-UI (both FP16 HDR, ready at screenshot time).
+        // EXR source: Composite for with-UI, HdrScene for without-UI (both FP16 HDR, rendered this frame).
         var source = screenshot.DisableUi ? HdrPipeline.HdrScene : HdrPipeline.Composite;
         if (source == null)
             return; // source not ready (e.g. a very early frame): skip EXR, the engine saves SDR as usual
@@ -43,7 +44,7 @@ internal static class ScreenshotPatch
         {
             var exrFile = new FileHandleWritable(screenshot.SaveFile.Root,
                                                  Path.ChangeExtension(screenshot.SaveFile.Path, ".exr"));
-            HdrScreenshot.CaptureExr(source, exrFile);
+            HdrScreenshot.CaptureExr(source, exrFile, readyFrame);
         }
         catch (Exception e)
         {

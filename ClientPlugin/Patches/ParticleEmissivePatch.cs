@@ -73,7 +73,7 @@ internal static class ParticleEmissivePatch
     }
 
     // When encoding an emitter template: cache the original peak + its subset per definition, and boost the data produced this pass.
-    [HarmonyPatch(typeof(ParticleEmitterDefinitionExtention), "BuildGPUParticleEmitter")]
+    [HarmonyPatch(typeof(ParticleEmitterDefinitionExtention), nameof(ParticleEmitterDefinitionExtention.BuildGPUParticleEmitter))]
     [HarmonyPostfix]
     private static unsafe void BoostAndCache(ParticleEmitterDefinition emitterDefinition, ref GPUParticleEmitter __result)
     {
@@ -96,7 +96,7 @@ internal static class ParticleEmissivePatch
     }
 
     // Every render frame (before particle processing): if K changed since last time, write the new peak back into each emitter's Emissivity subset, pushing only that one subset.
-    [HarmonyPatch(typeof(ParticleEmitterProcessingJob), "DoWork")]
+    [HarmonyPatch(typeof(ParticleEmitterProcessingJob), nameof(ParticleEmitterProcessingJob.DoWork))]
     [HarmonyPrefix]
     private static unsafe void ReuploadIfChanged()
     {

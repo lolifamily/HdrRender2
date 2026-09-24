@@ -26,16 +26,16 @@ internal static class SwapChainPatch
         AccessTools.Method(typeof(DXGIFormatExt), nameof(DXGIFormatExt.NonSRGB));
 
     // desc.Format: R8G8B8A8_UNorm_SRgb.NonSRGB() -> FP16 (Update()'s recreate also goes through this method; one site covers both)
-    [HarmonyPatch("CreateD3DSwapChain")]
+    [HarmonyPatch(nameof(SwapChain.CreateD3DSwapChain))]
     [HarmonyTranspiler]
     private static List<CodeInstruction> CreateD3DSwapChain_Transpiler(IEnumerable<CodeInstruction> instructions)
-        => ReplaceSrgbWithFp16(instructions, "CreateD3DSwapChain");
+        => ReplaceSrgbWithFp16(instructions, nameof(SwapChain.CreateD3DSwapChain));
 
     // backbuffer wrapper's RTV format -> FP16
-    [HarmonyPatch("InitializeBackBufferWrappers")]
+    [HarmonyPatch(nameof(SwapChain.InitializeBackBufferWrappers))]
     [HarmonyTranspiler]
     private static List<CodeInstruction> InitializeBackBufferWrappers_Transpiler(IEnumerable<CodeInstruction> instructions)
-        => ReplaceSrgbWithFp16(instructions, "InitializeBackBufferWrappers");
+        => ReplaceSrgbWithFp16(instructions, nameof(SwapChain.InitializeBackBufferWrappers));
 
     // Replace the R8G8B8A8_UNorm_SRgb constant inside the method with R16G16B16A16_Float.
     // If a .NonSRGB() call immediately follows, nop it out: FP16 has no sRGB variant, so the call is redundant (and may return Unknown).
@@ -67,7 +67,7 @@ internal static class SwapChainPatch
     }
 
     // Set the scRGB colorspace after swapchain creation (the SE2 engine never calls this; the plugin supplies it).
-    [HarmonyPatch("CreateD3DSwapChain")]
+    [HarmonyPatch(nameof(SwapChain.CreateD3DSwapChain))]
     [HarmonyPostfix]
     private static void CreateD3DSwapChain_Postfix(IDXGISwapChain3 __result)
     {

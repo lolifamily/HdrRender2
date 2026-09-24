@@ -1,34 +1,47 @@
-// HDROutput2 - scene tonemap takeover: BT.2390 EETF (PQ space).
-// Ported from the core section of SE1 HdrTonemap.hlsl.
-// Pipeline: exposure -> add engine bloom -> EETF. Grain / dirt / color filters / soft-clip omitted.
+// HDROutput2 - scene tonemap takeover: the engine's scene color, one BT.2390 display mapping (PQ space).
+// Ported from SE1 HdrTonemap.hlsl.
 //
-// Bindings must match the plugin's hand-built root signature (all space0):
+// Bindings must match the plugin's hand-built root signature:
 //   b0 = HdrConstants, t0 = scene HDR src, t1 = eye-adaptation exposure, t2 = engine bloom,
-//   u0 = FP16 HDR output (HdrScene), u1 = 8-bit SDR output (engine FinalLDR, no UI)
+//   u0 = FP16 HDR output (HdrScene), u1 = 8-bit SDR output (engine FinalLDR, no UI),
+//   space6 = the engine's bindless texture table (bloom dirt), bound by the engine at dispatch.
 //
-// Dual output: EETF-shaped HDR goes to u0 for present/EXR; a BT.2446 SDR of the SAME
-// EETF result goes to u1, refilling the engine's FinalLDR so its native screenshot /
-// thumbnail / downsample path keeps working (we bypassed the engine's own tonemap).
+// Two units meet in this shader:
+//   scene-normalized  1.0 = scene paper white, the scene's SDR reference white
+//   scRGB             1.0 = 80 nits; paper_white, peak and source_peak are scRGB
+// The LBuffer is not SDR-referred: exposure puts the average scene near 1, and the engine's Hable curve maps that
+// through a toe of slope sdr_gain of SDR white. Scaling by it keeps the engine's shadows and midtones and anchors
+// them to paper white; highlights then go up to the display peak instead of into Hable's shoulder.
 //
-// LBuffer semantics: SE's scene buffer is "SDR-tonemap-ready" (1.0 = SDR display white),
-// NOT absolute-nits. Treat it as direct scRGB (1.0 = 80 nits); do NOT inverse-tonemap by
-// multiplying paper_white (that would over-brighten mid illumination ~2.5x).
-// paper_white is only used in the UI composite path.
+// Dual output: HDR (scRGB) to u0 for present/EXR; an SDR preview of the same frame to u1, refilling the engine's
+// FinalLDR so its native screenshot / thumbnail / downsample path and FXAA keep working.
 
 cbuffer HdrConstants : register(b0)
 {
-    float paper_white;   // scRGB, SDR white anchor (UI composite)
-    float peak;          // scRGB, display peak
-    float source_peak;   // scRGB, scene peak (EETF source ceiling)
-    float black_lift;    // shadow lift
-    float bloom_mult;    // engine Post_.BloomMult (default 0.02); scales bloom before EETF
+    float paper_white;
+    float peak;
+    float source_peak;          // >= peak, see TonemapPatch
+    float black_lift;
+
+    float sdr_gain;             // see TonemapPatch.SdrGainAt
+    float bloom_mult;           // engine Post_ values from here on
+    float bloom_dirt_ratio;
+    float bright_desaturation;
+
+    int   dirt_texture_id;
+    int   enable_exposure;
+    int   disable_tonemapping;
+    int   needs_alpha_luminance;
 };
 
 Texture2D source_tex            : register(t0);
 Texture2D<float2> avg_luminance : register(t1);
 Texture2D bloom_tex             : register(t2);   // engine bloom (low-res cascade, needs bilinear upsample)
-RWTexture2D<float4> destination     : register(u0);   // FP16 HDR (HdrScene)
-RWTexture2D<float4> ldr_destination : register(u1);   // 8-bit SDR (engine FinalLDR)
+RWTexture2D<float4> destination           : register(u0);   // FP16 HDR (HdrScene)
+RWTexture2D<unorm float4> ldr_destination : register(u1);   // 8-bit SDR (engine FinalLDR), declared unorm like the engine's own
+
+// The engine's bindless texture table (Common/Resources/Managed.hlsli).
+Texture2D<float4> managed_textures[8192] : register(t0, space6);
 
 // Engine static sampler auto-appended to every root signature (AllSamplers.hlsli: LinearSampler @ s2).
 SamplerState LinearSampler : register(s2);
@@ -61,16 +74,9 @@ float get_relative_luminance(float3 rgb)
     return dot(rgb, float3(0.2126, 0.7152, 0.0722));
 }
 
-// BT.2446 Method A SDR tonemap (matches SE1 CPU SaveSdrPng bit-for-bit).
-// Below knee: linear pass-through preserves midtones. Above knee: Reinhard shoulder
-// asymptotic to 1.0. Overbright pixels desaturate toward luma (Hunt effect). Then sRGB.
-float tonemap_knee(float norm)
+float max3(float3 c)
 {
-    float knee  = 0.75;
-    float delta = 0.5;
-    float range = 0.25; // 1 - knee
-    float excess = norm - knee;
-    return norm <= knee ? norm : knee + range * excess / (excess + delta);
+    return max(max(c.r, c.g), c.b);
 }
 
 float linear_to_srgb(float c)
@@ -78,15 +84,60 @@ float linear_to_srgb(float c)
     return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(max(c, 0.0), 1.0 / 2.4) - 0.055;
 }
 
-// hdr: scRGB (1.0 = 80 nits); pw: paper_white in scRGB. Returns sRGB-encoded [0,1].
-float3 hdr_to_sdr(float3 hdr, float pw)
+float3 rgb_to_srgb(float3 c)
 {
-    float3 n = max(hdr, 0.0) / pw;                        // normalize so paper_white -> 1.0
-    float luma = max(get_relative_luminance(n), 1e-6);
-    float overbright = saturate((luma - 1.0) / luma);    // desatThreshold = 1.0
-    n = lerp(n, luma.xxx, overbright);
-    float3 tm = float3(tonemap_knee(n.r), tonemap_knee(n.g), tonemap_knee(n.b));
-    return float3(linear_to_srgb(tm.r), linear_to_srgb(tm.g), linear_to_srgb(tm.b));
+    return float3(linear_to_srgb(c.r), linear_to_srgb(c.g), linear_to_srgb(c.b));
+}
+
+// BT.2390 EETF, scRGB in and out. KS is derived from the display / source peak ratio; below it the curve is
+// identity, above it a Hermite shoulder (C1 at KS, flat at the end) lands exactly on peak at source_peak. The
+// black level lift comes after the shoulder, as E3 in BT.2390.
+float eetf(float l)
+{
+    float source_pq = max(linear_to_pq(source_peak), 1e-6);
+    float max_lum   = saturate(linear_to_pq(peak) / source_pq);
+    float ks        = saturate(1.5 * max_lum - 0.5);
+
+    float e = saturate(linear_to_pq(l) / source_pq);
+    if (e > ks)
+    {
+        float t  = (e - ks) / max(1.0 - ks, 1e-6);
+        float t2 = t * t;
+        float t3 = t2 * t;
+        e =  (2.0 * t3 - 3.0 * t2 + 1.0) * ks
+          +  (t3 - 2.0 * t2 + t) * (1.0 - ks)
+          +  (-2.0 * t3 + 3.0 * t2) * max_lum;
+    }
+
+    float one_minus_e    = 1.0 - e;
+    float one_minus_e_sq = one_minus_e * one_minus_e;
+    e += black_lift * one_minus_e_sq * one_minus_e_sq;
+
+    return pq_to_linear(e * source_pq);
+}
+
+// Display mapping: one EETF, on max(R,G,B). Scaling all channels by the ratio of mapped to unmapped max keeps hue
+// and saturation, and no channel can exceed peak. Input and output are scene-normalized.
+float3 map_to_display(float3 n)
+{
+    float m = max3(n) * paper_white;
+    return n * (eetf(m) / max(m, 1e-6));
+}
+
+// SDR preview of the HDR frame (the SE1 screenshot rule): normalized to the scene paper white, so that display
+// setting drops out; below half of it nothing changes, above it an extended Reinhard shoulder on max(R,G,B), C1 at
+// the knee, reaches 1.0 exactly at the display peak. Hue and saturation are kept.
+float3 sdr_preview(float3 n)
+{
+    const float knee = 0.5;
+    float white = max((peak / paper_white - knee) / (1.0 - knee), 1e-3);   // shoulder input at the display peak
+    float m = max3(n);
+    if (m > knee)
+    {
+        float e = (m - knee) / (1.0 - knee);
+        n *= (knee + (1.0 - knee) * e * (1.0 + e / (white * white)) / (1.0 + e)) / m;
+    }
+    return rgb_to_srgb(min(n, 1.0));
 }
 
 [numthreads(8, 8, 1)]
@@ -94,57 +145,29 @@ void cs_main(uint3 dtid : SV_DispatchThreadID)
 {
     uint2 texel = dtid.xy;
 
-    // Exposure: borrow engine eye-adaptation only (avg_luminance.g stores log2 exposure).
-    float3 source = source_tex[texel].xyz;
-    float exposure = exp2(avg_luminance[uint2(0, 0)].g);
-    float3 color = exposure * source;
-
-    // Bloom: the engine already baked exposure into its prefilter, so add it un-exposed here,
-    // BEFORE the EETF, so bloom highlights get shaped into the HDR range instead of clipping.
-    // Bloom is a low-res cascade -> bilinear upsample via UV. Off/menu path binds a 1x1 black
-    // texture (SceneDrawSystem), so this reads 0 and is a no-op. Lens-dirt term omitted.
     float2 dst_size;
     destination.GetDimensions(dst_size.x, dst_size.y);
-    float2 bloom_uv = (texel + 0.5) / dst_size;
-    color += bloom_tex.SampleLevel(LinearSampler, bloom_uv, 0).xyz * bloom_mult;
+    float2 uv = (texel + 0.5) / dst_size;
 
-    // BT.2390 EETF in PQ space. When source <= display the curve collapses to a linear hard cap.
-    float lum = max(get_relative_luminance(color), 1e-6);
+    // 1. The engine's scene color (ToneMapping.hlsl): exposure, then bloom scaled by the lens dirt mask. Bloom is a
+    //    low-res cascade, bilinearly upsampled; with bloom off the engine binds a 1x1 black texture.
+    float exposure = enable_exposure ? exp2(avg_luminance[uint2(0, 0)].g) : 1.0;
+    float dirt = managed_textures[dirt_texture_id].SampleLevel(LinearSampler, uv, 0).r * bloom_dirt_ratio + (1.0 - bloom_dirt_ratio);
+    float3 color = exposure * source_tex[texel].xyz + bloom_tex.SampleLevel(LinearSampler, uv, 0).xyz * bloom_mult * dirt;
 
-    float display_peak_pq = linear_to_pq(peak);
-    float source_peak_pq  = max(linear_to_pq(source_peak), 1e-6);
-    float max_lum_norm    = saturate(display_peak_pq / source_peak_pq);
-    float ks              = clamp(1.5 * max_lum_norm - 0.5, 0.0, 1.0);
-
-    float lum_pq = linear_to_pq(lum);
-    float e      = saturate(lum_pq / source_peak_pq);
-
-    // Black lift in PQ space (BT.2390 Annex 3).
-    float one_minus_e    = 1.0 - e;
-    float one_minus_e_sq = one_minus_e * one_minus_e;
-    e = e + black_lift * one_minus_e_sq * one_minus_e_sq;
-
-    // Cubic Hermite shoulder (C1 continuous at KS, tangent 0 at peak).
-    float e_out;
-    if (e < ks)
-    {
-        e_out = e;
-    }
+    // 2. Scene-normalized and display-mapped. BrightDesaturation only exists in front of the engine's curve; its
+    //    variant without tone mapping (debug overrides) clips at SDR white instead.
+    //    A NaN or +Inf in the scene (R11G11B10 keeps both) turns the mapping into NaN on all three channels. The
+    //    engine's saturate() makes such a pixel black; max() does the same here (it returns the non-NaN operand).
+    float3 n;
+    if (disable_tonemapping)
+        n = saturate(color);
     else
-    {
-        float t  = (e - ks) / max(1.0 - ks, 1e-6);
-        float t2 = t * t;
-        float t3 = t2 * t;
-        e_out =  (2.0 * t3 - 3.0 * t2 + 1.0) * ks
-              +  (t3 - 2.0 * t2 + t) * (1.0 - ks)
-              +  (-2.0 * t3 + 3.0 * t2) * max_lum_norm;
-    }
+        n = max(map_to_display(sdr_gain * (color + get_relative_luminance(color) * bright_desaturation)), 0.0);
 
-    float mapped_lum_pq = e_out * source_peak_pq;
-    float mapped_lum    = pq_to_linear(mapped_lum_pq);
-    float3 hdr          = color * (mapped_lum / lum);
-    hdr = max(hdr, 0.0);
-
-    destination[texel]     = float4(hdr, 1.0);                       // FP16 HDR -> present/EXR
-    ldr_destination[texel] = float4(hdr_to_sdr(hdr, paper_white), 1.0); // SDR -> engine FinalLDR (no UI)
+    // 3. HDR out, and the SDR preview of the same frame. FXAA reads perceptual luma from .w when asked: the engine's
+    //    is the luma of its sRGB-encoded SDR image.
+    float3 sdr = sdr_preview(n);
+    destination[texel]     = float4(n * paper_white, 1.0);
+    ldr_destination[texel] = float4(sdr, needs_alpha_luminance ? get_relative_luminance(sdr) : 1.0);
 }

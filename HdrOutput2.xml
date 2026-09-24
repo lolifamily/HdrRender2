@@ -14,16 +14,17 @@
     <Author>lolifamily</Author>
 
     <!-- Optional tooltip for the plugin in the plugin list -->
-    <Tooltip>True HDR output: fp16 scRGB swapchain, BT.2390 tonemapping, emissive particle boost, EXR screenshots</Tooltip>
+    <Tooltip>True HDR output: fp16 scRGB swapchain, BT.2390 tonemapping, separate UI brightness, emissive particle boost, EXR screenshots</Tooltip>
 
     <!-- Optional plugin description. If omitted, this will be the same as the Tooltip. 1000 characters max. -->
     <Description>Adds a true HDR output path to Space Engineers 2 (DX12).
 The swapchain becomes flip-model R16G16B16A16_Float with scRGB color space.
-The engine's SDR tonemapping is replaced by a BT.2390 EETF curve (PQ space) that preserves highlight detail beyond SDR white, with configurable peak, paper-white, source peak, and black lift.
-The UI is drawn on a separate layer and composited at your paper-white brightness, so SDR menus and HUD read correctly on an HDR display.
-Emissive GPU particles (thrusters, lasers, muzzle flashes, explosions) can be boosted by a configurable factor with live preview; diffuse smoke and dust are untouched.
+A BT.2390 display mapping (PQ space) replaces the engine's SDR tonemapping: the original shadows and midtones sit at a configurable scene paper white, highlights extend up to the display peak.
+The UI is composited from its own layer at its own brightness, so SDR menus and HUD read correctly on an HDR display.
+Emissive GPU particles (thrusters, lasers, muzzle flashes, explosions) can be boosted with live preview; smoke and dust are untouched.
 Screenshots are also exported as OpenEXR (HDR) beside the game's normal SDR image.
-Luminance only, Rec.709 primaries; no wide-gamut remap.
+Use FSR for anti-aliasing in HDR; FXAA only reaches the SDR copy used for thumbnails.
+Rec.709 primaries, hue-preserving mapping; no wide-gamut remap.
 Auto-disables itself if it crashes during init, with a config flag to re-enable.
 Requires Windows HDR enabled and a supported display; can be force-enabled on SDR displays.</Description>
 
@@ -32,8 +33,8 @@ Requires Windows HDR enabled and a supported display; can be force-enabled on SD
         <Directory>ClientPlugin</Directory>
     </SourceDirectories>
 
-    <!-- Shader assets copied onto disk and exposed to the plugin via LoadAssets(assetFolder). -->
-    <AssetFolder>ClientPlugin/Assets/</AssetFolder>
+    <!-- Assets are resolved to local paths by Name; the one named AssetFolder is passed to LoadAssets(string). -->
+    <Asset Name="AssetFolder" Path="ClientPlugin/Assets/" />
 
     <!-- The current plugin version's commit hash -->
     <Commit>HEAD</Commit>
