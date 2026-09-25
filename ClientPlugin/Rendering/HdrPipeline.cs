@@ -42,6 +42,11 @@ internal struct HdrConstants
     public int EnableExposure;
     public int DisableTonemapping;
     public int NeedsAlphaLuminance;   // FXAA reads luma from the SDR output's alpha
+
+    public float WhitePoint;          // engine Post_: its Hable curve, for the vanilla color
+    public int EnableSmoothHable;
+    public float NaturalColor;
+    public float Padding;
 }
 
 // UI composite constants; layout must match the cbuffer in Composite.hlsl.

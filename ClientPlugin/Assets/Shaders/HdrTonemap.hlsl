@@ -32,6 +32,11 @@ cbuffer HdrConstants : register(b0)
     int   enable_exposure;
     int   disable_tonemapping;
     int   needs_alpha_luminance;
+
+    float white_point;          // the engine's Hable white point
+    int   enable_smooth_hable;
+    float natural_color;        // see map_to_display
+    float padding;
 };
 
 Texture2D source_tex            : register(t0);
@@ -116,12 +121,31 @@ float eetf(float l)
     return pq_to_linear(e * source_pq);
 }
 
-// Display mapping: one EETF, on max(R,G,B). Scaling all channels by the ratio of mapped to unmapped max keeps hue
-// and saturation, and no channel can exceed peak. Input and output are scene-normalized.
-float3 map_to_display(float3 n)
+// The vanilla SDR color of the pixel, as the engine's tonemap computes it (ToneMapping.hlsl, Filters.hlsli) from the
+// same input: its filmic curve per channel -- SmoothHable, Hable(x) / Hable(x + WhitePoint), or Hable(x) /
+// Hable(WhitePoint) -- then saturate. Its channels fade to white as they grow, the look the content was authored for.
+float3 hable(float3 x)
 {
-    float m = max3(n) * paper_white;
-    return n * (eetf(m) / max(m, 1e-6));
+    const float A = 0.15, B = 0.50, C = 0.10, D = 0.20, E = 0.02, F = 0.30;
+    return (x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F) - E / F;
+}
+
+float3 vanilla_color(float3 color)
+{
+    float w = max(white_point, 1e-3);
+    return saturate(hable(color) / hable(enable_smooth_hable ? color + w : w.xxx));
+}
+
+// Display mapping: one EETF, on max(R,G,B), so no channel can exceed peak. The color direction, max(R,G,B) = 1,
+// blends by natural_color from the vanilla color's (0: the authored look, bright colors fade to white) to the HDR
+// color's own (1: hue and saturation kept at any brightness, as the eye sees it). n is scene-normalized, in and out;
+// vanilla is vanilla_color() of the same pixel.
+float3 map_to_display(float3 n, float3 vanilla)
+{
+    float m = max3(n);
+    float3 vanilla_dir = vanilla / max(max3(vanilla), 1e-6);
+    float3 hdr_dir = n / max(m, 1e-6);
+    return eetf(m * paper_white) / paper_white * lerp(vanilla_dir, hdr_dir, natural_color);
 }
 
 // SDR preview of the HDR frame (the SE1 screenshot rule): normalized to the scene paper white, so that display
@@ -163,7 +187,10 @@ void cs_main(uint3 dtid : SV_DispatchThreadID)
     if (disable_tonemapping)
         n = saturate(color);
     else
-        n = max(map_to_display(sdr_gain * (color + get_relative_luminance(color) * bright_desaturation)), 0.0);
+    {
+        color += get_relative_luminance(color) * bright_desaturation;
+        n = max(map_to_display(sdr_gain * color, vanilla_color(color)), 0.0);
+    }
 
     // 3. HDR out, and the SDR preview of the same frame. FXAA reads perceptual luma from .w when asked: the engine's
     //    is the luma of its sRGB-encoded SDR image.

@@ -86,6 +86,14 @@ public class Config : INotifyPropertyChanged
         set => SetField(ref field, value);
     } = 6f;
 
+    [Slider(0f, 1f, 0.05f, description: "0 = vanilla: bright colors fade to white. 1 = they keep their color.")]
+    public float NaturalColor
+    {
+        get;
+        [UsedImplicitly]
+        set => SetField(ref field, value);
+    } = 1f;
+
     [Slider(0f, 0.1f, 0.005f, description: "Shadow lift (raise dark detail)")]
     public float BlackLift
     {

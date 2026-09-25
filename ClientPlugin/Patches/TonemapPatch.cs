@@ -66,7 +66,11 @@ internal static class TonemapPatch
             DirtTextureId = post.DirtTextureId,
             EnableExposure = post.EnableExposure,
             DisableTonemapping = settings.ToneMapping ? 0 : 1,
-            NeedsAlphaLuminance = writeAlphaLuminance ? 1 : 0
+            NeedsAlphaLuminance = writeAlphaLuminance ? 1 : 0,
+
+            WhitePoint = post.WhitePoint,
+            EnableSmoothHable = post.EnableSmoothHable,
+            NaturalColor = cfg.NaturalColor
         };
         using var cbv = CoreSystems.BindableBuffers.CreateTransientConstantBuffer("HdrConstants", in constants);
 
