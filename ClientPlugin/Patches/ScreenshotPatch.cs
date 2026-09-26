@@ -10,7 +10,7 @@ namespace ClientPlugin.Patches;
 
 // HDR EXR export -- additive, not a takeover.
 //
-// The tonemap (TonemapPatch) and UI composite (UiLayerPatch) already refilled the correct SDR into the engine's
+// The tonemap (TonemapPatch) and frame-end composite (FrameEndPatch) already refilled the correct SDR into the engine's
 // FinalLDRTexture, so the engine's native screenshot save can read back SDR from FinalLDR on its own: the
 // downsampled thumbnail/icon is scaled by the engine's CopyJob and jpg/bmp is encoded by the engine, all for free,
 // so I let them all through with return true.

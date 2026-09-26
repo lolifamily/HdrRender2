@@ -12,7 +12,7 @@ namespace ClientPlugin.Patches;
 
 // Tonemap takeover: replace the engine's Hable with the plugin's own EETF compute, output to HdrPipeline.HdrScene (FP16).
 // The engine's ldrDst gets an SDR preview of the same frame (its screenshot/thumbnail path and FXAA read it);
-// the composite pass consumes HdrScene and writes it into the backbuffer.
+// the frame-end composite (FrameEndPatch) puts the UI layer over HdrScene for the backbuffer.
 [HarmonyPatch(typeof(ToneMappingJob), nameof(ToneMappingJob.DoWork))]
 internal static class TonemapPatch
 {
@@ -88,7 +88,7 @@ internal static class TonemapPatch
         var tgy = (int)Math.Ceiling(res.Y / 8f);
         commandList.Dispatch(HdrPipeline.EetfPso, tgx, tgy, 1);
         commandList.ClearBindings();
-        HdrPipeline.MarkScene(); // mark this frame as having an HDR scene; the composite uses HdrScene as its scene
+        SceneImportPatch.MarkTonemapped(); // this ApplyToneMapping wrote HdrScene; there is no HDR input to import
         return false; // skip the engine's original tonemap (EETF already produced HDR, and SDR was refilled into FinalLDR)
     }
 }

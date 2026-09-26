@@ -41,12 +41,17 @@ internal static class ParticleEmissivePatch
 {
     private const float Fp16Max = 65504f; // largest finite fp16 value; guards against K*peak overflowing to Inf
 
+    // UploadEmitterData's slicing: each emitter is EMITTER_CHUNKS subsets of EMITTER_CHUNK_SIZE bytes. Consts are baked
+    // in at compile time and Pulsar recompiles on every game version, so these follow any change to that layout.
+    private const int SubsetSize = ParticleEffectManagerComponent.EMITTER_CHUNK_SIZE;
+    private const int SubsetsPerEmitter = ParticleEffectManagerComponent.EMITTER_CHUNKS;
+
     private struct Slot
     {
-        public int SubsetIdx;        // which 256B subset (0..3) the Emissivity peak lands in
+        public int SubsetIdx;        // which subset the Emissivity peak lands in
         public int PeakOffInSubset;  // byte offset of the peak uint within that subset
         public float OrigPeak;       // original pre-boost peak (multiply it by K each time, never accumulate)
-        public ParticleEffectManagerComponent.GPUParticleEmitterSubset OrigSubset; // the full 256B of that subset before boost
+        public ParticleEffectManagerComponent.GPUParticleEmitterSubset OrigSubset; // that whole subset before boost
     }
 
     private static readonly Dictionary<ParticleEmitterDefinition, Slot> Cache = new();
@@ -78,7 +83,7 @@ internal static class ParticleEmissivePatch
     private static unsafe void BoostAndCache(ParticleEmitterDefinition emitterDefinition, ref GPUParticleEmitter __result)
     {
         var off = PeakByteOffset();
-        var subsetIdx = off / 256;
+        var subsetIdx = off / SubsetSize;
         var packed = __result.Emissivity.PackedValueMultiplierAndKey1;
         var origPeak = (float)BitConverter.UInt16BitsToHalf((ushort)(packed & 0xFFFF));
 
@@ -86,10 +91,10 @@ internal static class ParticleEmissivePatch
         Cache[emitterDefinition] = new Slot
         {
             SubsetIdx = subsetIdx,
-            PeakOffInSubset = off % 256,
+            PeakOffInSubset = off % SubsetSize,
             OrigPeak = origPeak,
             // Dereference-assign: cache this subset before boost (original peak + other fields). Writing OrigSubset= explicitly so the compiler treats it as an assignment.
-            OrigSubset = *(ParticleEffectManagerComponent.GPUParticleEmitterSubset*)(baseP + subsetIdx * 256)
+            OrigSubset = *(ParticleEffectManagerComponent.GPUParticleEmitterSubset*)(baseP + subsetIdx * SubsetSize)
         };
 
         __result.Emissivity.PackedValueMultiplierAndKey1 = ScalePacked(packed, origPeak, Config.Current.ParticleBoost);
@@ -114,7 +119,7 @@ internal static class ParticleEmissivePatch
             var sub = slot.OrigSubset; // start from the original subset, change only the 2 peak bytes, leave the rest
             var peakPtr = (byte*)Unsafe.AsPointer(ref sub) + slot.PeakOffInSubset;
             *(uint*)peakPtr = ScalePacked(*(uint*)peakPtr, slot.OrigPeak, k);
-            ped.ScheduleUpdate(kv.Value * 4 + slot.SubsetIdx, sub);
+            ped.ScheduleUpdate(kv.Value * SubsetsPerEmitter + slot.SubsetIdx, sub);
         }
     }
 }

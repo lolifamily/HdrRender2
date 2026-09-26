@@ -8,6 +8,7 @@ using Keen.VRage.Library.Mathematics;
 using Keen.VRage.Library.Threading;
 using Keen.VRage.Render12.Core;
 using Keen.VRage.Render12.Core.CommandLists;
+using Keen.VRage.Render12.Core.Systems;
 using Keen.VRage.Render12.Resources.BindableTextures;
 using Keen.VRage.Render12.Resources.PipelineStates;
 using Keen.VRage.Render12.Resources.RootSignature;
@@ -49,14 +50,36 @@ internal struct HdrConstants
     public float Padding;
 }
 
-// UI composite constants; layout must match the cbuffer in Composite.hlsl.
+// Frame composite constants; layout must match the cbuffer in Composite.hlsl.
 [StructLayout(LayoutKind.Sequential)]
 internal struct CompositeConstants
 {
     public float PaperWhite;     // scene paper white: the SDR preview normalizes to it
     public float UiBrightness;
     public float Peak;           // display peak: where the SDR preview's shoulder ends
-    public uint HasScene;        // 1 = sample scene_tex (in-game); 0 = menu (scene=0, t0 is just a placeholder)
+    public uint HasScene;        // 0 = menu: no 3D scene, t0 is a placeholder and not sampled
+    public uint HasUi;           // 0 = a held frame whose UI went to the engine's placeholder: the scene alone
+    public uint WriteBack;       // 1 = replace FinalLDR with the SDR of the composite
+}
+
+// Scene import constants; layout must match the cbuffer in SceneImport.hlsl.
+[StructLayout(LayoutKind.Sequential)]
+internal struct ImportConstants
+{
+    public float PaperWhite;
+    public float Peak;
+    public uint OriginX;         // rectangle to import, in texels, inside HdrScene
+    public uint OriginY;
+    public uint Width;
+    public uint Height;
+}
+
+// What FinalLDR holds at the frame end. UiLayerPatch sets it on in-game frames; menus never reach it and stay Menu.
+internal enum FrameKind
+{
+    Menu,    // no 3D scene: the engine cleared FinalLDR and drew the UI into it
+    Layer,   // FinalLDR was cleared into the UI layer over this frame's HdrScene
+    Hold     // the frame was drawn into the engine's placeholder; FinalLDR still holds the previous one
 }
 
 // The three PSOs VectorRenderer draws Slug content with: vector fonts, single- and multi-color vector graphics.
@@ -75,7 +98,7 @@ internal readonly record struct VectorPsos(GraphicsPSO Font, GraphicsPSO General
 
 // Plugin's self-built compute pipelines: read .hlsl from disk, compile with DXC, build a bare PSO
 // (hybrid path: dispatch via the engine so it manages resource state), and create the FP16 buffers.
-// The tonemap (EETF) and UI composite passes share the resources here.
+// The tonemap (EETF), scene import and frame composite passes share the resources here.
 internal static class HdrPipeline
 {
     private static bool _initTried;
@@ -83,18 +106,25 @@ internal static class HdrPipeline
 
     // EETF tonemap: scene HDR -> HdrScene (FP16)
     private static RootSignature _eetfRootSig;
+
+    // Scene import: linear content -> HdrScene
+    private static RootSignature _importRootSig;
+    private static ComputePSO _importPso;
+
+    // Frame composite: HdrScene + FinalLDR (UI layer) -> Composite (FP16)
+    private static RootSignature _compositeRootSig;
     private static ComputePSO _compositePso;
 
-    // UI composite: HdrScene + UiLayer -> Composite (FP16)
-    private static RootSignature _compositeRootSig;
+    // Bound as the composite's scene in menus, where it is not sampled.
+    private static ResizableRWRenderTargetTexture _noScene;
 
     public static ComputePSO EetfPso { get; private set; }
     public static ResizableRWRenderTargetTexture HdrScene { get; private set; }
-    public static ResizableRWRenderTargetTexture UiLayer { get; private set; }
     public static ResizableRWRenderTargetTexture Composite { get; private set; }
 
-    // HDR is available only when both pipelines are ready.
+    // HDR is available only when all pipelines are ready.
     public static bool Ready => EetfPso != null && EetfPso.IsValid()
+                             && _importPso != null && _importPso.IsValid()
                              && _compositePso != null && _compositePso.IsValid();
 
     // VectorRenderer's PSOs built with SlugAlphaBlendPatch.UiLayerSlug, for the UI layer. Compiled by the engine's
@@ -142,15 +172,25 @@ internal static class HdrPipeline
                 RParam.CreateManaged(ShaderVisibility.All));
             EetfPso = BuildPso("HdrEetf", _eetfRootSig, "HdrTonemap.hlsl");
 
-            // u0 = FP16 HDR (Composite), u1 = 8-bit SDR with UI (engine FinalLDR)
+            // t0 = linear source (the engine's HDR input, or its scene image through the sRGB view), u0 = HdrScene
+            _importRootSig = CoreSystems.RootSignatures.GetRootSignature(
+                "HdrImport", RootSignatureFlags.None,
+                RParam.CreateCBV<IConstantBufferView>(0, 0, ShaderVisibility.All),
+                RParam.CreateSRV<ITexture2DView>(0, 0, ShaderVisibility.All),
+                RParam.CreateUAV<IRWTexture2DView>(0, 0, ShaderVisibility.All));
+            _importPso = BuildPso("HdrImport", _importRootSig, "SceneImport.hlsl");
+
+            // t0 = scene, u0 = FP16 HDR (Composite), u1 = FinalLDR (UI layer in, SDR with UI out)
             _compositeRootSig = CoreSystems.RootSignatures.GetRootSignature(
                 "HdrComposite", RootSignatureFlags.None,
                 RParam.CreateCBV<IConstantBufferView>(0, 0, ShaderVisibility.All),
                 RParam.CreateSRV<ITexture2DView>(0, 0, ShaderVisibility.All),
-                RParam.CreateSRV<ITexture2DView>(1, 0, ShaderVisibility.All),
                 RParam.CreateUAV<IRWTexture2DView>(0, 0, ShaderVisibility.All),
                 RParam.CreateUAV<IRWTexture2DView>(1, 0, ShaderVisibility.All));
             _compositePso = BuildPso("HdrComposite", _compositeRootSig, "Composite.hlsl");
+
+            _noScene = CoreSystems.BindableTextures.CreateRWResizableRenderTargetTexture(
+                "HdrNoScene", HdrResources.BackbufferFormat, new Vector2I(1, 1));
 
             BuildUiVectorPsos();
 
@@ -181,7 +221,7 @@ internal static class HdrPipeline
         return pso;
     }
 
-    // VectorRenderer.CreatePSO's three PSOs, blended with UiLayerSlug instead of Slug.
+    // VectorRenderer.CreatePSO's three PSOs, blended with UiLayerSlug instead of Slug, for the UI layer: FinalLDR's format.
     private static void BuildUiVectorPsos()
     {
         var layout = default(VertexLayout)
@@ -206,7 +246,7 @@ internal static class HdrPipeline
                 DepthStencilState = DepthStencilState.None,
                 SampleMask = uint.MaxValue,
                 PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
-                RenderTargetFormats = [HdrResources.UiLayerFormat],
+                RenderTargetFormats = [ScreenBuffers.LDR_FORMAT],
                 DepthStencilFormat = Format.Unknown
             }, layout);
 
@@ -234,17 +274,8 @@ internal static class HdrPipeline
         HdrScene.Resize(commandList, resolution);
     }
 
-    // Create/recreate the separate UI layer (8-bit sRGB, same format as the engine's FinalLDR, so the UI PSO lookup doesn't crash).
-    public static void EnsureUiBuffer(Vector2I resolution)
-    {
-        if (UiLayer != null && UiLayer.Resolution == resolution) return;
-        UiLayer?.Dispose();
-        UiLayer = CoreSystems.BindableTextures.CreateRWResizableRenderTargetTexture(
-            "HdrUiLayer", HdrResources.UiLayerFormat, resolution, uavFormat: HdrResources.UiLayerUavFormat);
-    }
-
     // Create/recreate the composite output buffer (FP16, copied to the backbuffer).
-    public static void EnsureComposite(Vector2I resolution)
+    private static void EnsureComposite(Vector2I resolution)
     {
         if (Composite != null && Composite.Resolution == resolution) return;
         Composite?.Dispose();
@@ -252,36 +283,75 @@ internal static class HdrPipeline
             "HdrComposite", HdrResources.BackbufferFormat, resolution);
     }
 
-    // Whether the tonemap was taken over this frame (the composite's scene is HdrScene, else black: menus have no 3D scene).
-    private static volatile bool _sceneThisFrame;
-    public static void MarkScene() => _sceneThisFrame = true;
-    public static bool TakeSceneFlag() { var v = _sceneThisFrame; _sceneThisFrame = false; return v; }
-
-    // Composite: scene + UI (8-bit, premultiplied over) x UI brightness -> Composite (FP16, u0) + SDR (ldrOut, u1).
-    // scene is HdrScene (in-game EETF, FP16, possibly below output resolution) or, in menus, an unsampled placeholder (hasScene = false).
-    // ldrOut = NonSRGB UAV of the engine's FinalLDRTexture: writes SDR with UI, feeds the engine's native with-UI screenshot path.
-    public static void DispatchComposite(ComputeCommandList commandList, ITexture2DView scene, IRWTexture2DView ldrOut, bool hasScene)
+    // Write linear content times paper white into HdrScene over a rectangle, clipped to it (SceneImportPatch): the HDR
+    // input of a frame the engine did not tonemap, or debug output it drew into its scene image. The source is read at
+    // the same texels: it has HdrScene's resolution.
+    public static void ImportScene(ComputeCommandList commandList, ITexture2DView source, Vector2I origin, Vector2I size)
     {
+        var res = HdrScene.Resolution;
+        int x0 = Math.Max(origin.X, 0), y0 = Math.Max(origin.Y, 0);
+        int x1 = Math.Min(origin.X + size.X, res.X), y1 = Math.Min(origin.Y + size.Y, res.Y);
+        if (x1 <= x0 || y1 <= y0)
+            return;
+
+        var cfg = Config.Current;
+        var constants = new ImportConstants
+        {
+            PaperWhite = cfg.ScenePaperWhite / 80f,   // nits -> scRGB (1.0 = 80 nits)
+            Peak = cfg.PeakBrightness / 80f,
+            OriginX = (uint)x0,
+            OriginY = (uint)y0,
+            Width = (uint)(x1 - x0),
+            Height = (uint)(y1 - y0)
+        };
+        using var cbv = CoreSystems.BindableBuffers.CreateTransientConstantBuffer("ImportConstants", in constants);
+        var rpb = new RootParameterBuilder(commandList);
+        rpb.AddCBV(cbv);
+        rpb.AddSRV(source);
+        rpb.AddUAV(HdrScene.GetRWTexture2DView(0));
+        var tgx = (int)Math.Ceiling((x1 - x0) / 8f);
+        var tgy = (int)Math.Ceiling((y1 - y0) / 8f);
+        commandList.Dispatch(_importPso, tgx, tgy, 1);
+        commandList.ClearBindings();
+    }
+
+    // Frame end (FrameEndPatch): the engine's FinalLDR is final, about to be read by its screenshots and presented, and
+    // the composite becomes final with it: the UI layer over HdrScene, or over black in menus. A held frame keeps the
+    // previous composite, as the engine keeps presenting the previous FinalLDR -- but only one of the backbuffer's size
+    // can be held. Otherwise (first frames, a resize during a hold) the frame's own HdrScene is shown, without the UI,
+    // which went to the placeholder: never an SDR frame in place of the HDR one.
+    public static void ComposeFrame(FrameKind kind)
+    {
+        var resolution = CoreSystems.SwapChain.Resolution;
+        if (kind == FrameKind.Hold && Composite != null && Composite.Resolution == resolution)
+            return;
+
+        EnsureComposite(resolution);
+        var hasScene = kind != FrameKind.Menu && HdrScene != null;
         var cfg = Config.Current;
         var constants = new CompositeConstants
         {
             PaperWhite = cfg.ScenePaperWhite / 80f,   // nits -> scRGB (1.0 = 80 nits)
             UiBrightness = cfg.UiBrightness / 80f,
             Peak = cfg.PeakBrightness / 80f,
-            HasScene = hasScene ? 1u : 0u
+            HasScene = hasScene ? 1u : 0u,
+            HasUi = kind != FrameKind.Hold ? 1u : 0u,
+            WriteBack = kind == FrameKind.Layer ? 1u : 0u   // menus keep the engine's own FinalLDR
         };
+
+        using var commandList = CoreSystems.FrameDispatcher.CreateDirectCommandList("HdrComposite");
         using var cbv = CoreSystems.BindableBuffers.CreateTransientConstantBuffer("CompositeConstants", in constants);
         var rpb = new RootParameterBuilder(commandList);
         rpb.AddCBV(cbv);
-        rpb.AddSRV(scene);
-        rpb.AddSRV(UiLayer);
+        rpb.AddSRV(hasScene ? HdrScene : _noScene);
         rpb.AddUAV(Composite.GetRWTexture2DView(0));
-        rpb.AddUAV(ldrOut);
-        var res = Composite.Resolution;
-        var tgx = (int)Math.Ceiling(res.X / 8f);
-        var tgy = (int)Math.Ceiling(res.Y / 8f);
+        rpb.AddUAV(CoreSystems.ScreenBuffers.FinalLDRTexture.GetRWTexture2DView(0));
+        var tgx = (int)Math.Ceiling(resolution.X / 8f);
+        var tgy = (int)Math.Ceiling(resolution.Y / 8f);
         commandList.Dispatch(_compositePso, tgx, tgy, 1);
         commandList.ClearBindings();
+        // Composite UAV -> CopySource, for the present CopyResource to read (cross-list tracked by AutoResourceState).
+        commandList.ExplicitStateTransition(Composite.AutoResourceState, ResourceStates.CopySource);
     }
 
     // Pulsar injects the asset folder via LoadAssets; shaders are read from <assetFolder>/Shaders (same as SE1).
