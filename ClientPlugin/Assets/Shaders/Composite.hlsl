@@ -4,7 +4,8 @@
 //
 // The UI layer is the engine's own FinalLDR: in-game it is cleared to transparent right before DrawUI (UiLayerPatch),
 // in menus the engine clears it itself. The UI, the video player, the top-most debug shapes and the debug histogram
-// all land in it, premultiplied. It is read here through its UNORM UAV, so the sRGB bytes are decoded by hand.
+// all land in it, premultiplied. It is read here through its UNORM UAV and its sRGB bytes are decoded by hand, the way
+// a gamma 2.2 monitor decodes them, like the scene in HdrScene (HdrTonemap.hlsl sdr_on_gamma22).
 //
 // Bindings (all space0): b0 = CompositeConstants, t0 = scene,
 //   u0 = FP16 HDR composite (Composite -> present/EXR),
@@ -36,29 +37,10 @@ float max3(float3 c)
     return max(max(c.r, c.g), c.b);
 }
 
-float linear_to_srgb(float c)
-{
-    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(max(c, 0.0), 1.0 / 2.4) - 0.055;
-}
-
-float3 rgb_to_srgb(float3 c)
-{
-    return float3(linear_to_srgb(c.r), linear_to_srgb(c.g), linear_to_srgb(c.b));
-}
-
-float srgb_to_linear(float c)
-{
-    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
-}
-
-float3 srgb_to_rgb(float3 c)
-{
-    return float3(srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b));
-}
-
 // SDR preview, same rule as HdrTonemap.hlsl: normalized to the scene paper white, identity below half of it, an
 // extended Reinhard shoulder on max(R,G,B) above, reaching 1.0 at the display peak. A UI set dimmer or brighter
-// than the scene keeps that relation.
+// than the scene keeps that relation. Encoded with 1 / 2.2: the composite holds what a gamma 2.2 monitor shows, so
+// this gives back the bytes the engine would have written (below the knee exactly, for the scene and opaque UI).
 float3 sdr_preview(float3 n)
 {
     const float knee = 0.5;
@@ -69,7 +51,7 @@ float3 sdr_preview(float3 n)
         float e = (m - knee) / (1.0 - knee);
         n *= (knee + (1.0 - knee) * e * (1.0 + e / (white * white)) / (1.0 + e)) / m;
     }
-    return rgb_to_srgb(min(n, 1.0));
+    return pow(min(n, 1.0), 1.0 / 2.2);
 }
 
 float3 load_scene(uint2 texel)
@@ -92,7 +74,7 @@ void cs_main(uint3 dtid : SV_DispatchThreadID)
     if (has_ui != 0)
     {
         float4 encoded = ldr[texel];
-        ui = float4(srgb_to_rgb(encoded.rgb), encoded.a);   // premultiplied alpha, linear
+        ui = float4(pow(encoded.rgb, 2.2), encoded.a);   // premultiplied alpha, linear as a 2.2 monitor decodes it
     }
 
     // Premultiplied "over", UI scaled to its own brightness.

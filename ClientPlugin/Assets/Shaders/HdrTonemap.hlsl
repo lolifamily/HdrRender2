@@ -37,6 +37,11 @@ cbuffer HdrConstants : register(b0)
     int   enable_smooth_hable;
     float natural_color;        // see map_to_display
     float padding;
+
+    float midtones_end;         // see midtones
+    float midtones_level;
+    float midtones_slope;
+    float padding2;
 };
 
 Texture2D source_tex            : register(t0);
@@ -94,6 +99,15 @@ float3 rgb_to_srgb(float3 c)
     return float3(linear_to_srgb(c.r), linear_to_srgb(c.g), linear_to_srgb(c.b));
 }
 
+// SDR as a gamma 2.2 monitor shows it: the engine encodes its SDR output with the piecewise sRGB curve, most monitors
+// decode that with a plain 2.2, whose toe darkens the deepest tones. The HDR output takes that decode for the SDR
+// range; above SDR white (1.0) there is no SDR look to keep. Composite.hlsl decodes the UI the same way,
+// SceneImport.hlsl the imported scene, and the composite's SDR write-back encodes with 1 / 2.2 to undo it.
+float3 sdr_on_gamma22(float3 x)
+{
+    return select(x <= 1.0, pow(rgb_to_srgb(x), 2.2), x);
+}
+
 // BT.2390 EETF, scRGB in and out. KS is derived from the display / source peak ratio; below it the curve is
 // identity, above it a Hermite shoulder (C1 at KS, flat at the end) lands exactly on peak at source_peak. The
 // black level lift comes after the shoulder, as E3 in BT.2390.
@@ -136,16 +150,25 @@ float3 vanilla_color(float3 color)
     return saturate(hable(color) / hable(enable_smooth_hable ? color + w : w.xxx));
 }
 
-// Display mapping: one EETF, on max(R,G,B), so no channel can exceed peak. The color direction, max(R,G,B) = 1,
-// blends by natural_color from the vanilla color's (0: the authored look, bright colors fade to white) to the HDR
-// color's own (1: hue and saturation kept at any brightness, as the eye sees it). n is scene-normalized, in and out;
-// vanilla is vanilla_color() of the same pixel.
+// Vanilla midtones: below midtones_end the vanilla curve itself, the SDR midtones as the content was graded; above
+// it the curve's tangent, C1, on into the EETF (TonemapPatch.MidtonesAt). m is scene-normalized max(R,G,B),
+// vanilla_max the vanilla curve at the same point. Off, the tangent (0, 0, 1) is m itself.
+float midtones(float m, float vanilla_max)
+{
+    return m < midtones_end ? vanilla_max : midtones_level + midtones_slope * (m - midtones_end);
+}
+
+// Display mapping: one EETF, on max(R,G,B) after midtones(), so no channel can exceed peak. The color direction,
+// max(R,G,B) = 1, blends by natural_color from the vanilla color's (0: the authored look, bright colors fade to white)
+// to the HDR color's own (1: hue and saturation kept at any brightness, as the eye sees it). n is scene-normalized,
+// in and out; vanilla is vanilla_color() of the same pixel.
 float3 map_to_display(float3 n, float3 vanilla)
 {
     float m = max3(n);
-    float3 vanilla_dir = vanilla / max(max3(vanilla), 1e-6);
+    float vanilla_max = max3(vanilla);
+    float3 vanilla_dir = vanilla / max(vanilla_max, 1e-6);
     float3 hdr_dir = n / max(m, 1e-6);
-    return eetf(m * paper_white) / paper_white * lerp(vanilla_dir, hdr_dir, natural_color);
+    return eetf(midtones(m, vanilla_max) * paper_white) / paper_white * lerp(vanilla_dir, hdr_dir, natural_color);
 }
 
 // SDR preview of the HDR frame (the SE1 screenshot rule): normalized to the scene paper white, so that display
@@ -192,9 +215,10 @@ void cs_main(uint3 dtid : SV_DispatchThreadID)
         n = max(map_to_display(sdr_gain * color, vanilla_color(color)), 0.0);
     }
 
-    // 3. HDR out, and the SDR preview of the same frame. FXAA reads perceptual luma from .w when asked: the engine's
-    //    is the luma of its sRGB-encoded SDR image.
+    // 3. HDR out, its SDR range as a gamma 2.2 monitor shows it, and the SDR preview of the same frame, encoded as the
+    //    engine encodes it. FXAA reads perceptual luma from .w when asked: the engine's is the luma of its sRGB-encoded
+    //    SDR image.
     float3 sdr = sdr_preview(n);
-    destination[texel]     = float4(n * paper_white, 1.0);
+    destination[texel]     = float4(sdr_on_gamma22(n) * paper_white, 1.0);
     ldr_destination[texel] = float4(sdr, needs_alpha_luminance ? get_relative_luminance(sdr) : 1.0);
 }

@@ -48,6 +48,11 @@ internal struct HdrConstants
     public int EnableSmoothHable;
     public float NaturalColor;
     public float Padding;
+
+    public float MidtonesEnd;         // see TonemapPatch.MidtonesAt
+    public float MidtonesLevel;
+    public float MidtonesSlope;
+    public float Padding2;
 }
 
 // Frame composite constants; layout must match the cbuffer in Composite.hlsl.
