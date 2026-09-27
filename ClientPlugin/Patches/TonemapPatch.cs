@@ -82,6 +82,7 @@ internal static class TonemapPatch
         if (!HdrPipeline.Ready)
             return true; // not ready: fall back to the engine's original tonemap
 
+        PartialEyeAdaptation.Update();
         HdrPipeline.EnsureScene(commandList, ldrDst.Resolution);
 
         var settings = CoreSystems.Settings.PostProcess;

@@ -198,6 +198,7 @@ internal static class HdrPipeline
                 "HdrNoScene", HdrResources.BackbufferFormat, new Vector2I(1, 1));
 
             BuildUiVectorPsos();
+            PartialEyeAdaptation.Register(Path.Combine(_assetsFolder, "Shaders"));
 
             Log.Default.WriteLine("[HdrOutput2] pipelines initialized");
         }
