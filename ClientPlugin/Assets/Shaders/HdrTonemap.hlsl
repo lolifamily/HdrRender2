@@ -2,7 +2,7 @@
 // Ported from SE1 HdrTonemap.hlsl.
 //
 // Bindings must match the plugin's hand-built root signature:
-//   b0 = HdrConstants, t0 = scene HDR src, t1 = eye-adaptation exposure, t2 = engine bloom,
+//   b0 = HdrConstants, t0 = scene HDR src, t1 = eye-adaptation exposure, t2 = engine bloom, t3 = gamut walls,
 //   u0 = FP16 HDR output (HdrScene), u1 = 8-bit SDR output (engine FinalLDR, no UI),
 //   space6 = the engine's bindless texture table (bloom dirt), bound by the engine at dispatch.
 //
@@ -36,17 +36,20 @@ cbuffer HdrConstants : register(b0)
     float white_point;          // the engine's Hable white point
     int   enable_smooth_hable;
     float natural_color;        // see map_to_display
-    float padding;
+    float gamut_expansion;      // see expand_gamut
 
     float midtones_end;         // see midtones
     float midtones_level;
     float midtones_slope;
-    float padding2;
+    uint  gamut_bins;           // entries in gamut_walls, see gamut_wall
+
+    float natural_tones;        // see expand_gamut
 };
 
 Texture2D source_tex            : register(t0);
 Texture2D<float2> avg_luminance : register(t1);
 Texture2D bloom_tex             : register(t2);   // engine bloom (low-res cascade, needs bilinear upsample)
+StructuredBuffer<float4> gamut_walls : register(t3);   // per Oklab hue, as C / L: BT.709 wall, P3 wall, natural tones' edge
 RWTexture2D<float4> destination           : register(u0);   // FP16 HDR (HdrScene)
 RWTexture2D<unorm float4> ldr_destination : register(u1);   // 8-bit SDR (engine FinalLDR), declared unorm like the engine's own
 
@@ -187,6 +190,110 @@ float3 sdr_preview(float3 n)
     return rgb_to_srgb(min(n, 1.0));
 }
 
+// Gamut expansion, gamut_expansion 0..1, 0 = off: a saturation boost bounded by Display P3, the gamut HDR panels actually
+// cover. A color moves along its Oklab hue line toward the P3 wall and is scaled back to its luminance: Oklab is
+// homogeneous, so the scale keeps its hue and saturation. Oklab rather than linear light, whose line to white bends the
+// hue of reds, oranges and blues by up to 5 degrees. Natural tones stay: nothing inside their edge (GamutWalls) moves, and
+// the move rises along a smoothstep to full strength on the BT.709 wall. It starts flat, as the d^2 of Ward et al.'s
+// hybrid color mapping does, so a gradient crossing the edge shows no crease, but reaches mid-saturated colors sooner:
+// against P3 rather than their laser gamut, d^2 left almost nothing to see. On the BT.709 wall the color covers
+// gamut_expansion / 2 of the distance left to the P3 wall, at most half: further, ruddy tones just outside the natural
+// ones, the upper eyelids of SE1's bare face, turn visibly orange. natural_tones, 0.7..1, scales the gate toward grey,
+// where it starts and where it is full alike, reaching more flowers and foliage and warming skin. Scaling the start
+// alone left the move too gentle to see: it still rose all the way to the BT.709 wall, where the P3 wall leaves little
+// room. At 0.7 and full expansion 60% of the flowers' colored pixels change visibly, lit skin still by less than 1 JND,
+// the upper eyelids by more. Most of the visible change stays inside BT.709: P3 alone adds 10-16% room for reds and
+// yellows. Shadows stay; a color that would pass the display peak moves less rather than get dimmer. v is linear
+// BT.709, 1.0 = paper white; the result can go negative, which scRGB carries as the colors outside BT.709.
+static const float3x3 bt709_to_p3 = float3x3(
+    0.8224621, 0.1775380, 0.0000000,
+    0.0331942, 0.9668058, 0.0000000,
+    0.0170826, 0.0723974, 0.9105199);
+
+// Oklab (Ottosson), from and to linear BT.709; GamutWalls.cs builds its walls with the same inverse.
+static const float3x3 oklab_lms = float3x3(
+    0.4122214708, 0.5363325363, 0.0514459929,
+    0.2119034982, 0.6806995451, 0.1073969566,
+    0.0883024619, 0.2817188376, 0.6299787005);
+static const float3x3 oklab_lab = float3x3(
+    0.2104542553,  0.7936177850, -0.0040720468,
+    1.9779984951, -2.4285922050,  0.4505937099,
+    0.0259040371,  0.7827717662, -0.8086757660);
+static const float3x3 oklab_lab_inv = float3x3(
+    1.0,  0.3963377774,  0.2158037573,
+    1.0, -0.1055613458, -0.0638541728,
+    1.0, -0.0894841775, -1.2914855480);
+static const float3x3 oklab_lms_inv = float3x3(
+     4.0767416621, -3.3077115913,  0.2309699292,
+    -1.2684380046,  2.6097574011, -0.3413193965,
+    -0.0041960863, -0.7034186147,  1.7076147010);
+
+float3 to_oklab(float3 v)
+{
+    return mul(oklab_lab, pow(max(mul(oklab_lms, v), 0.0), 1.0 / 3.0));
+}
+
+float3 from_oklab(float3 lab)
+{
+    float3 lms = mul(oklab_lab_inv, lab);
+    return mul(oklab_lms_inv, lms * lms * lms);
+}
+
+// The table at an Oklab hue, linear between the bins of GamutWalls, which cover the circle from -pi and wrap. The engine
+// binds gamut_walls as a root SRV, a bare GPU address: GetDimensions has no size to report and nothing checks bounds, so
+// the count comes from the constants and every index wraps into it, whatever the hue.
+float4 gamut_wall(float hue)
+{
+    float t = (hue / 6.28318531 + 0.5) * gamut_bins;
+    uint  i = uint(t);
+    return lerp(gamut_walls[i % gamut_bins], gamut_walls[(i + 1) % gamut_bins], frac(t));
+}
+
+// lab with its chroma times k, scaled back to luminance y.
+float3 expand_to(float3 lab, float k, float y)
+{
+    float3 v = from_oklab(float3(lab.x, lab.yz * k));
+    return v * (y / max(get_relative_luminance(v), 1e-9));
+}
+
+float3 expand_gamut(float3 v)
+{
+    float  y   = get_relative_luminance(v);
+    float3 lab = to_oklab(v);
+    float  c   = length(lab.yz);
+    if (gamut_expansion <= 0.0 || y <= 0.0 || c <= 1e-6)
+        return v;
+
+    float4 wall = gamut_wall(atan2(lab.z, lab.y));              // x: BT.709, y: P3, z: natural tones' edge
+    float  s    = c / lab.x;                                    // Oklab saturation, C / L
+    float  to   = s + 0.5 * gamut_expansion * max(wall.y - s, 0.0)
+                * smoothstep(wall.z, wall.x, s / natural_tones)  // natural tones stay, full on the BT.709 wall
+                * smoothstep(0.15, 0.45, pow(y, 1.0 / 3.0));    // shadows stay
+    if (to <= s)
+        return v;
+
+    // Past the display peak in P3, move less: the brightest channel grows with the move, so bisect the move down,
+    // luminance kept. Only the few colors that are both bright and saturated take this branch. 12 halvings: the result
+    // steps in (k - 1) / 4096, so neighboring colors keep their order of saturation to within 1e-4 of it.
+    float  peak_n = peak / paper_white;
+    float  k      = to / s;
+    float3 result = expand_to(lab, k, y);
+    if (max3(mul(bt709_to_p3, result)) > peak_n)
+    {
+        float lo = 1.0, hi = k;
+        [loop] for (int i = 0; i < 12; i++)
+        {
+            float mid = 0.5 * (lo + hi);
+            if (max3(mul(bt709_to_p3, expand_to(lab, mid, y))) <= peak_n)
+                lo = mid;
+            else
+                hi = mid;
+        }
+        result = expand_to(lab, lo, y);
+    }
+    return result;
+}
+
 [numthreads(8, 8, 1)]
 void cs_main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -215,10 +322,10 @@ void cs_main(uint3 dtid : SV_DispatchThreadID)
         n = max(map_to_display(sdr_gain * color, vanilla_color(color)), 0.0);
     }
 
-    // 3. HDR out, its SDR range as a gamma 2.2 monitor shows it, and the SDR preview of the same frame, encoded as the
-    //    engine encodes it. FXAA reads perceptual luma from .w when asked: the engine's is the luma of its sRGB-encoded
-    //    SDR image.
+    // 3. HDR out, its SDR range as a gamma 2.2 monitor shows it, its saturated colors expanded toward P3 when enabled;
+    //    and the SDR preview of the same frame, not expanded (SDR has no room for it), encoded as the engine encodes it.
+    //    FXAA reads perceptual luma from .w when asked: the engine's is the luma of its sRGB-encoded SDR image.
     float3 sdr = sdr_preview(n);
-    destination[texel]     = float4(sdr_on_gamma22(n) * paper_white, 1.0);
+    destination[texel]     = float4(expand_gamut(sdr_on_gamma22(n)) * paper_white, 1.0);
     ldr_destination[texel] = float4(sdr, needs_alpha_luminance ? get_relative_luminance(sdr) : 1.0);
 }

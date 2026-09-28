@@ -58,11 +58,13 @@ internal static class SwapChainPatch
             codes[i + 1].opcode = OpCodes.Nop;
             codes[i + 1].operand = null;
         }
+        // None found: the swapchain would stay 8-bit while CompositePatch still presents the FP16 composite into it.
+        // Fail at load, in the plugin's constructor, rather than at the first present.
         if (replaced == 0)
-            Log.Default.WriteLine(LogSeverity.Warning,
-                $"[HdrOutput2] SwapChain.{method}: no sRGB format constant found -> HDR will NOT engage (engine layout changed?)");
-        else
-            Log.Default.WriteLine($"[HdrOutput2] SwapChain.{method}: {replaced} format constant(s) -> FP16");
+            throw new InvalidOperationException(
+                $"SwapChain.{method}: no sRGB format constant found (engine layout changed?)");
+
+        Log.Default.WriteLine($"[HdrOutput2] SwapChain.{method}: {replaced} format constant(s) -> FP16");
         return codes;
     }
 

@@ -41,6 +41,7 @@ float max3(float3 c)
 // extended Reinhard shoulder on max(R,G,B) above, reaching 1.0 at the display peak. A UI set dimmer or brighter
 // than the scene keeps that relation. Encoded with 1 / 2.2: the composite holds what a gamma 2.2 monitor shows, so
 // this gives back the bytes the engine would have written (below the knee exactly, for the scene and opaque UI).
+// Clamped at 0 too: with gamut expansion the scene carries colors outside BT.709, negative in scRGB, which SDR clips.
 float3 sdr_preview(float3 n)
 {
     const float knee = 0.5;
@@ -51,7 +52,7 @@ float3 sdr_preview(float3 n)
         float e = (m - knee) / (1.0 - knee);
         n *= (knee + (1.0 - knee) * e * (1.0 + e / (white * white)) / (1.0 + e)) / m;
     }
-    return pow(min(n, 1.0), 1.0 / 2.2);
+    return pow(saturate(n), 1.0 / 2.2);
 }
 
 float3 load_scene(uint2 texel)

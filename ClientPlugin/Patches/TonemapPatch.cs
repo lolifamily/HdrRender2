@@ -117,19 +117,25 @@ internal static class TonemapPatch
             WhitePoint = post.WhitePoint,
             EnableSmoothHable = post.EnableSmoothHable,
             NaturalColor = cfg.NaturalColor,
+            GamutExpansion = cfg.GamutExpansion,
 
             MidtonesEnd = midtones.End,
             MidtonesLevel = midtones.Level,
-            MidtonesSlope = midtones.Slope
+            MidtonesSlope = midtones.Slope,
+            GamutBins = GamutWalls.Bins,
+
+            NaturalTones = cfg.NaturalTones
         };
         using var cbv = CoreSystems.BindableBuffers.CreateTransientConstantBuffer("HdrConstants", in constants);
 
         var dst = HdrPipeline.HdrScene.GetRWTexture2DView(0);
+        var walls = GamutWalls.Buffer(commandList);   // uploaded here the first time, ahead of the dispatch that reads it
         var rpb = new RootParameterBuilder(commandList);
         rpb.AddCBV(cbv);
         rpb.AddSRV(hdrSrc);
         rpb.AddSRV(exposure);
         rpb.AddSRV(bloom);     // t2 = engine bloom (low-res cascade, bilinearly upsampled and added back in the shader)
+        rpb.AddSRV(walls);     // t3 = gamut walls for expand_gamut
         rpb.AddUAV(dst);       // u0 = HdrScene (FP16 HDR)
         rpb.AddUAV(ldrDst);    // u1 = engine's original tonemap target (normally FinalLDRTexture); writes UI-less SDR, feeds the engine's UI-less screenshot/thumbnail path
 

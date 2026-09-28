@@ -47,12 +47,14 @@ internal struct HdrConstants
     public float WhitePoint;          // engine Post_: its Hable curve, for the vanilla color
     public int EnableSmoothHable;
     public float NaturalColor;
-    public float Padding;
+    public float GamutExpansion;      // see HdrTonemap.hlsl expand_gamut
 
     public float MidtonesEnd;         // see TonemapPatch.MidtonesAt
     public float MidtonesLevel;
     public float MidtonesSlope;
-    public float Padding2;
+    public uint GamutBins;            // GamutWalls.Bins: the root SRV carries no size for the shader to query
+
+    public float NaturalTones;        // see HdrTonemap.hlsl expand_gamut
 }
 
 // Frame composite constants; layout must match the cbuffer in Composite.hlsl.
@@ -172,6 +174,7 @@ internal static class HdrPipeline
                 RParam.CreateSRV<ITexture2DView>(0, 0, ShaderVisibility.All),
                 RParam.CreateSRV<ITexture2DView>(1, 0, ShaderVisibility.All),
                 RParam.CreateSRV<ITexture2DView>(2, 0, ShaderVisibility.All),   // t2 = engine bloom
+                RParam.CreateSRV<IStructuredBufferView>(3, 0, ShaderVisibility.All),   // t3 = gamut walls, GamutWalls
                 RParam.CreateUAV<IRWTexture2DView>(0, 0, ShaderVisibility.All),
                 RParam.CreateUAV<IRWTexture2DView>(1, 0, ShaderVisibility.All),
                 RParam.CreateManaged(ShaderVisibility.All));

@@ -24,7 +24,7 @@ The UI is composited from its own layer at its own brightness, so SDR menus and 
 Emissive GPU particles (thrusters, lasers, muzzle flashes, explosions) can be boosted with live preview; smoke and dust are untouched.
 Screenshots are also exported as OpenEXR (HDR) beside the game's normal SDR image.
 Use FSR for anti-aliasing in HDR; FXAA only reaches the SDR copy used for thumbnails.
-Rec.709 primaries, hue-preserving mapping; no wide-gamut remap.
+Rec.709 primaries, hue-preserving mapping; optional P3 gamut expansion.
 Auto-disables itself if it crashes during init, with a config flag to re-enable.
 Requires Windows HDR enabled and a supported display; can be force-enabled on SDR displays.</Description>
 
